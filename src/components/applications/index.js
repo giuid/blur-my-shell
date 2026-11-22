@@ -60,7 +60,7 @@ export const ApplicationsBlur = class ApplicationsBlur {
             global.display,
             'window-entered-monitor',
             (_display, _monitor, meta_window) => {
-                if (meta_window.blur_actor && this.settings.applications.STATIC_BLUR)
+                if (meta_window.blur_actor && this.static_blur)
                     this.update_size(meta_window);
             }
         );
@@ -99,21 +99,66 @@ export const ApplicationsBlur = class ApplicationsBlur {
         }
     }
 
+    /// Static blur when chosen, and while a window picker is open (the overview, or another
+    /// extension's through `request_static`): its window previews are painted where the dynamic
+    /// blur has no backdrop to capture, so they would show through unblurred.
+    get static_blur() {
+        return this.settings.applications.STATIC_BLUR || this.static_requests?.size > 0;
+    }
+
+    /// A picker other than the overview may show windows that are not on screen: they keep their blur.
+    get picker_open() {
+        return [...this.static_requests ?? []].some(owner => owner !== 'overview');
+    }
+
+    /// Rebuilds the blur of every blurred window, after the blur type changed.
+    rebuild_blurs() {
+        this.meta_windows.forEach(meta_window => {
+            if (!meta_window.blur_actor)
+                return;
+            this.remove_blur(meta_window);
+            this.create_blur_effect(meta_window);
+        });
+    }
+
+    /// Dynamic blur on the desktop, static blur while `owner` (a window picker) is open.
+    /// Note: public API, e.g. `global.blur_my_shell?._applications_blur?.request_static?.('my-picker', true)`.
+    request_static(owner, on) {
+        this.static_requests ??= new Set();
+        if (on === this.static_requests.has(owner))
+            return;
+        const was_static = this.static_blur;
+        if (on)
+            this.static_requests.add(owner);
+        else
+            this.static_requests.delete(owner);
+        if (this.static_blur !== was_static)
+            this.rebuild_blurs();
+        this.meta_windows.forEach(meta_window => this.reconcile_window_visibility(meta_window));
+    }
+
+    set_overview_static(overview_static) {
+        this.request_static('overview', overview_static && this.settings.applications.BLUR_ON_OVERVIEW);
+    }
+
     /// Connect to the overview being opened/closed to force the blur being
     /// shown on every window of the workspaces viewer.
     connect_to_overview() {
         this.connections.disconnect_all_for(Main.overview);
         this.overview_visible = Main.overview.visible;
+        this.set_overview_static(this.overview_visible);
 
         const reconcile_windows = () => this.meta_windows.forEach(
             meta_window => this.reconcile_window_visibility(meta_window)
         );
         this.connections.connect(Main.overview, 'showing', _ => {
             this.overview_visible = true;
+            this.set_overview_static(true);
             reconcile_windows();
         });
         this.connections.connect(Main.overview, 'hidden', _ => {
             this.overview_visible = false;
+            this.set_overview_static(false);
             reconcile_windows();
         });
         this.connections.connect(Main.overview, 'window-drag-end', (_, meta_window) => {
@@ -198,7 +243,7 @@ export const ApplicationsBlur = class ApplicationsBlur {
             () => this.update_size(meta_window)
         );
 
-        if (this.settings.applications.STATIC_BLUR) {
+        if (this.static_blur) {
             this.connect_blur_signal(
                 meta_window,
                 meta_window,
@@ -262,7 +307,7 @@ export const ApplicationsBlur = class ApplicationsBlur {
             window_actor,
             'child-added',
             () => {
-                if (this.settings.applications.STATIC_BLUR
+                if (this.static_blur
                     && meta_window.get_client_type() === Meta.WindowClientType.X11)
                     window_actor.set_child_below_sibling(meta_window.blur_actor, null);
                 this.reconcile_window_visibility(meta_window);
@@ -292,7 +337,7 @@ export const ApplicationsBlur = class ApplicationsBlur {
     update_size(meta_window) {
         const blur_actor = meta_window.blur_actor;
 
-        if (this.settings.applications.STATIC_BLUR) {
+        if (this.static_blur) {
             const window_monitor_index = meta_window.get_monitor();
             const monitor = Main.layoutManager.monitors[window_monitor_index];
             if (!monitor)
@@ -336,7 +381,7 @@ export const ApplicationsBlur = class ApplicationsBlur {
         let blur_actor, bg_manager;
         let rounded_pipeline = null;
 
-        if (this.settings.applications.STATIC_BLUR) {
+        if (this.static_blur) {
             const pipeline = new Pipeline(
                 this.effects_manager,
                 global.blur_my_shell._pipelines_manager,
@@ -403,7 +448,7 @@ export const ApplicationsBlur = class ApplicationsBlur {
 
         let use_0_radius = !this.settings.applications.CORNER_WHEN_MAXIMIZED && (is_maximized || is_fullscreen);
 
-        if (this.settings.applications.STATIC_BLUR) {
+        if (this.static_blur) {
             meta_window.bms_rounded_pipeline.update();
             meta_window.bms_rounded_pipeline.setStraightCorners(use_0_radius);
         } else {
@@ -425,7 +470,8 @@ export const ApplicationsBlur = class ApplicationsBlur {
         const is_fullscreen = this.settings.applications.UNBLUR_WHEN_FULLSCREEN
             && meta_window.fullscreen;
         const visible_for_blur = meta_window.showing_on_its_workspace()
-            || (this.settings.applications.BLUR_ON_OVERVIEW && this.overview_visible);
+            || (this.settings.applications.BLUR_ON_OVERVIEW && this.overview_visible)
+            || this.picker_open;
         const show_blur = visible_for_blur
             && !is_focused
             && !is_fullscreen
@@ -529,6 +575,7 @@ export const ApplicationsBlur = class ApplicationsBlur {
         [...this.meta_windows].forEach(meta_window =>
             this.untrack_meta_window(meta_window)
         );
+        this.static_requests?.clear();
 
         this.menus.disable();
         this.connections.disconnect_all();
