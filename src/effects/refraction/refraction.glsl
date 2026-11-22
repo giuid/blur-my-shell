@@ -495,6 +495,10 @@ if (!useCircularSurface && (roundingRadius == 0.0 || R < shortestSide * 0.45)
     float offAxis = clamp((1.0 - max(abs(glareAxis.x), abs(glareAxis.y))) /
                           0.2928932, 0.0, 1.0);
     glareTaper = mix(glareTaper, glareFacing, offAxis);
+    // Pill (stadium) shape: the whole end is a corner, so the glare would taper
+    // to nothing there. Keep a floor so the rim stays continuous around the ends.
+    if (roundingRadius >= shortestSide * 0.5 - 0.5)
+        glareTaper = max(glareTaper, 0.8);
 
     if (fresnel_two_sided == 0) {
         float oneSidedMask = 1.0 - smoothstep(-0.2, 0.1, glareAxisDot);
